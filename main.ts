@@ -1,24 +1,17 @@
-// gta6-clipper-01 v5 — "The Ending: Jason & Lucia Jump Off a Roof" (Node 22,
-// standard library only).
+// gta6-clipper-01 v6 — "The Ending, Real Life" (Node 22, standard library only).
 //
 // A 32-second vertical YouTube Short for make.fun's "Clip GTA 6 for the most
-// YouTube views" bounty ($500 in USDC). Built to mimic the leaderboard's top
-// clips as closely as code can: ONE specific action moment (the rooftop jump
-// into the pool, the #1 clip's moment), photorealistic cinematic rendering
-// (realistic skin/clothes/hair, fire, water, chrome, depth, film grain,
-// cinematic grade), a shock hook in the first 2 seconds, a new angle or
-// action every 2-3 seconds, a relatable twist (13 years of waiting), big
-// burned-in text, a satisfying payoff, and a short make.fun pitch.
+// YouTube views" bounty ($500 in USDC). v6 drops the flat vector look: every
+// frame is a PHOTOREALISTIC still (generated cinematic stills, committed in
+// assets/frames/), animated in code with slow Ken Burns zoom/pan + crossfades
+// via ffmpeg, big text overlays, and the same synthesized soundtrack + SFX
+// as v5 (112 BPM synthwave, explosion, engine, riser, splash, final hit).
+// The stills are fixed files, so the render stays deterministic (fixed seed,
+// fixed metadata, same bytes on every run).
 //
-// Audio: a fully synthesized deterministic soundtrack + SFX (synthwave bass,
-// kick, hats, snare, arpeggio, riser, explosion, splash, engine) rendered
-// in pure Node as 48kHz PCM and muxed as AAC — no external files, no
-// downloads, no copyrighted music. The v2 clip was silent; v5 is not.
-//
-// Pipeline: twelve scene masters are rendered as PNGs (1296x2304, analytic
-// anti-aliasing, fixed seed 20261120), then assembled with ffmpeg into a
-// 1080x1920, 30fps, 32-second clip at /output/clip.mp4 (deterministic: fixed
-// seed, fixed metadata, same bytes on every run). VIDEO.json is copied to
+// Pipeline: the twelve stills are composited with text overlays into masters
+// as PNGs (1296x2304), then assembled with ffmpeg into a 1080x1920, 30fps,
+// 32-second clip at /output/clip.mp4, and VIDEO.json is copied to
 // /output/VIDEO.json, where the gate reads the YouTube video's address.
 //
 // Fallback: the grader's pinned node image ships no ffmpeg, so a missing or
@@ -33,9 +26,9 @@
 // bounty line and the play code in its description (see YOUTUBE-DESCRIPTION.txt),
 // then replace the placeholder in VIDEO.json with the video's address.
 
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { deflateSync } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 import { join } from 'node:path';
 
 const BOT_DIR = process.env.MAKEFUN_BOT_DIR ?? '/bot';
@@ -392,6 +385,120 @@ class Canvas {
 }
 
 // ---------------------------------------------------------------------------
+// v6 stills: PNG decoder (8-bit RGB/RGBA, non-interlaced, stdlib only) +
+// cover-fit blit with bilinear sampling. The stills are fixed committed
+// files, so decoding is deterministic and the render stays byte-stable.
+// ---------------------------------------------------------------------------
+interface DecodedImage { w: number; h: number; px: Uint8Array }
+
+function decodePNG(buf: Buffer): DecodedImage {
+  if (buf.readUInt32BE(0) !== 0x89504e47 || buf.readUInt32BE(4) !== 0x0d0a1a0a) {
+    throw new Error('not a PNG');
+  }
+  let off = 8;
+  let w = 0, h = 0, bitDepth = 0, colorType = 0, interlace = 0;
+  const idat: Buffer[] = [];
+  while (off < buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString('ascii', off + 4, off + 8);
+    const data = buf.subarray(off + 8, off + 8 + len);
+    if (type === 'IHDR') {
+      w = data.readUInt32BE(0); h = data.readUInt32BE(4);
+      bitDepth = data[8]; colorType = data[9]; interlace = data[12];
+    } else if (type === 'IDAT') {
+      idat.push(Buffer.from(data));
+    } else if (type === 'IEND') {
+      break;
+    }
+    off += 12 + len;
+  }
+  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6) || interlace !== 0) {
+    throw new Error(`unsupported PNG: bitDepth ${bitDepth} colorType ${colorType} interlace ${interlace}`);
+  }
+  const ch = colorType === 2 ? 3 : 4;
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = w * ch;
+  const px = new Uint8Array(w * h * 3);
+  let p = 0;
+  let prev = new Uint8Array(stride);
+  for (let y = 0; y < h; y++) {
+    const f = raw[p++];
+    const row = raw.subarray(p, p + stride);
+    p += stride;
+    const out = new Uint8Array(stride);
+    for (let x = 0; x < stride; x++) {
+      const a = x >= ch ? out[x - ch] : 0;
+      const b = prev[x];
+      const c = x >= ch ? prev[x - ch] : 0;
+      let v = row[x];
+      if (f === 1) v = (v + a) & 255;
+      else if (f === 2) v = (v + b) & 255;
+      else if (f === 3) v = (v + ((a + b) >> 1)) & 255;
+      else if (f === 4) {
+        const pa = Math.abs(b - c), pb = Math.abs(a - c), pc = Math.abs(a + b - 2 * c);
+        const pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+        v = (v + pr) & 255;
+      }
+      out[x] = v;
+    }
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 3;
+      const s2 = x * ch;
+      px[o] = out[s2]; px[o + 1] = out[s2 + 1]; px[o + 2] = out[s2 + 2];
+    }
+    prev = out;
+  }
+  return { w, h, px };
+}
+
+const STILL_CACHE = new Map<string, DecodedImage>();
+function loadStill(name: string): DecodedImage {
+  const hit = STILL_CACHE.get(name);
+  if (hit) return hit;
+  const img = decodePNG(readFileSync(join(BOT_DIR, 'assets', 'frames', name)));
+  STILL_CACHE.set(name, img);
+  return img;
+}
+
+// Cover-fit blit of a still onto the canvas, bilinear sampled.
+function drawStill(cv: Canvas, img: DecodedImage): void {
+  const scale = Math.max(cv.w / img.w, cv.h / img.h);
+  const sw = cv.w / scale, sh = cv.h / scale;
+  const ox = (img.w - sw) / 2, oy = (img.h - sh) / 2;
+  for (let y = 0; y < cv.h; y++) {
+    const sy = oy + (y + 0.5) * (sh / cv.h);
+    const y0 = Math.floor(sy), y1 = Math.min(img.h - 1, y0 + 1);
+    const fy = sy - y0;
+    for (let x = 0; x < cv.w; x++) {
+      const sx = ox + (x + 0.5) * (sw / cv.w);
+      const x0 = Math.floor(sx), x1 = Math.min(img.w - 1, x0 + 1);
+      const fx = sx - x0;
+      const i = (y * cv.w + x) * 3;
+      for (let c = 0; c < 3; c++) {
+        const p00 = img.px[(y0 * img.w + x0) * 3 + c];
+        const p10 = img.px[(y0 * img.w + x1) * 3 + c];
+        const p01 = img.px[(y1 * img.w + x0) * 3 + c];
+        const p11 = img.px[(y1 * img.w + x1) * 3 + c];
+        cv.px[i + c] = (p00 * (1 - fx) + p10 * fx) * (1 - fy) + (p01 * (1 - fx) + p11 * fx) * fy;
+      }
+    }
+  }
+}
+
+// One still + headline: a soft dark scrim band behind the text keeps it
+// readable on bright photos without looking like a cartoon banner.
+function stillScene(file: string, lines: HeadLine[], y0: number, gap: number): Canvas {
+  const cv = new Canvas(W, H);
+  drawStill(cv, loadStill(file));
+  let h = 0;
+  for (const ln of lines) h += 10 * fitScale(ln.text, ln.scale, 1180) + gap;
+  h -= gap;
+  cv.rect(0, y0 - 56, W, y0 + h + 44, rgb(0, 0, 0), 0.38, 14);
+  headline(cv, lines, y0, gap);
+  return cv;
+}
+
+// ---------------------------------------------------------------------------
 // Vector stroke font — a clean bold geometric sans, authored as stroke
 // paths on a 10-unit cap-height grid. Strokes render with round caps/joins
 // and analytic anti-aliasing, so lettering is smooth at any size (no
@@ -432,12 +539,12 @@ const FONT: Record<string, Glyph> = {
   '0': { adv: 9, path: 'A4 5 3.4 4.6 -90 -450' },
   '1': { adv: 9, path: 'M3 2.2 L5.5 0 L5.5 10 M2.8 10 L7 10' },
   '2': { adv: 9, path: 'A4.2 2.6 2.4 2.4 150 390 L1.5 10 L7 10' },
-  '3': { adv: 9, path: 'A4.5 2.5 2.3 2.3 150 390 M2 6 A4.6 7.3 2.6 2.6 180 -45' },
+  '3': { adv: 9, path: 'A4.5 2.3 2.3 2.1 150 390 M2 7.5 A4.6 7.5 2.6 2.3 180 -45' },
   '4': { adv: 9, path: 'M5.5 0 L1.8 6.5 L7 6.5 M5.5 0 L5.5 10' },
   '5': { adv: 9, path: 'M7 0 L1 0 L1 4.5 L5 4.5 A5 7.2 2.7 2.7 -90 90 L1 10' },
-  '6': { adv: 9, path: 'A4 5.6 3.4 4.2 -90 -450 M7.2 1.2 L6.6 5.5' },
+  '6': { adv: 9, path: 'A4 6.3 3.3 3.5 -90 -450 M1.7 5.9 A4.1 3.6 3.1 3.6 140 320' },
   '7': { adv: 9, path: 'M1 0 L7 0 L3.5 10' },
-  '8': { adv: 9, path: 'A4 2.6 2.6 2.2 -90 -450 M4 7.4 A4 7.4 3 3 -90 -450' },
+  '8': { adv: 9, path: 'A4 2.6 2.6 2.2 -90 -450 M4 7.2 A4 7.2 3 2.8 -90 -450' },
   '9': { adv: 9, path: 'A4 4.4 3.4 4.2 -90 -450 M7.4 4.4 L7.4 10' },
   '.': { adv: 4, path: 'A2 9.3 1 1 -90 -450' },
   '/': { adv: 6, path: 'M5 0 L1 10' },
@@ -1169,50 +1276,10 @@ function headline(cv: Canvas, lines: HeadLine[], y0: number, gap: number, maxW =
 // fire light, smoke, embers. "THE ENDING / IS INSANE".
 // ---------------------------------------------------------------------------
 function scene1(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#1a1626')],
-    [0.45, hex('#3a2030')],
-    [0.75, hex('#7a3a26')],
-    [1, hex('#2a1a20')],
-  ]);
-  // distant city glow + skyline through the underpass
-  cv.glow(880, 1050, 700, rgb(255, 140, 60), 0.5, 2);
-  skyline(cv, SEED + 21, 1500, 200, 380, hex('#241522'));
-  haze(cv, 1150, 1500, rgb(120, 60, 50), 0.3);
-  // the explosion
-  fireball(cv, 880, 950, 250, SEED + 31);
-  // concrete underpass pillars (fire-lit edges)
-  cv.rectGrad(0, 140, 250, 1560, [[0, rgb(58, 54, 66)], [1, rgb(34, 32, 42)]]);
-  cv.rectGrad(1046, 140, W, 1560, [[0, rgb(64, 58, 70)], [1, rgb(38, 34, 46)]]);
-  cv.capsule(250, 140, 250, 1560, 8, rgb(255, 150, 70), 0.35);
-  cv.capsule(1046, 140, 1046, 1560, 8, rgb(255, 150, 70), 0.4);
-  cv.rect(0, 0, W, 140, rgb(30, 28, 38), 1, 0);
-  speckle(cv, SEED + 92, 0, 140, 250, 1560, 350, [rgb(80, 76, 90), rgb(20, 18, 26)], 0.4, 2);
-  speckle(cv, SEED + 93, 1046, 140, W, 1560, 350, [rgb(86, 80, 96), rgb(22, 20, 28)], 0.4, 2);
-  // wet road with fire reflections
-  wetRoad(cv, 1500, H, [
-    [300, 26, rgb(255, 120, 50), 0.5],
-    [650, 22, rgb(255, 170, 80), 0.45],
-    [980, 30, rgb(255, 100, 40), 0.5],
-  ]);
-  // car behind the fire, lit by it
-  cv.glow(980, 1700, 420, rgb(255, 120, 50), 0.35, 2);
-  sportsCar(cv, 980, 1720, 0.85, hex('#1e1a26'), true);
-  // Lucia, rifle aimed, fire rim light on her
-  person(cv, 520, 1780, 880, 'aim', rgb(20, 16, 24), rgb(255, 150, 70), false, {
-    skin: rgb(216, 166, 122),
-    top: rgb(178, 44, 66),
-    bottom: rgb(32, 30, 40),
-    hair: rgb(58, 30, 18),
-    hairStyle: 'long',
-  });
-  rifle(cv, 640, 1042, -8, 1.1);
-  headline(cv, [
+  return stillScene('v6-01-hook.png', [
     { text: 'THE ENDING', scale: 18, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 380, 620) },
     { text: 'IS INSANE', scale: 20, color: rgb(255, 255, 255) },
-  ], 380, 46);
-  return cv;
+  ], 340, 46);
 }
 
 // ---------------------------------------------------------------------------
@@ -1220,31 +1287,10 @@ function scene1(): Canvas {
 // The relatable joke every GTA fan knows. "13 YEARS / LATER...".
 // ---------------------------------------------------------------------------
 function scene2(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#160a2e')],
-    [0.42, hex('#2c0f4d')],
-    [0.72, hex('#5c1a5e')],
-    [1, hex('#7a2d6e')],
-  ]);
-  stars(cv, SEED + 1, 170, 1150);
-  lightning(cv, SEED + 11, 150, -30);
-  synthSun(cv, 880, 1020, 300);
-  skyline(cv, SEED + 21, 1560, 280, 500, hex('#12081f'));
-  haze(cv, 1200, 1560, rgb(90, 40, 110), 0.25);
-  wetRoad(cv, 1560, H, [
-    [180, 26, rgb(255, 90, 180), 0.5],
-    [430, 20, rgb(80, 220, 255), 0.45],
-    [820, 24, rgb(255, 190, 80), 0.45],
-    [1120, 22, rgb(255, 90, 180), 0.5],
-  ]);
-  palm(cv, 70, 1580, 540, 95, hex('#0a0514'));
-  palm(cv, 1230, 1580, 480, -85, hex('#0a0514'));
-  headline(cv, [
-    { text: '13 YEARS', scale: 22, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 400, 660) },
+  return stillScene('v6-02-wait.png', [
+    { text: '13 YEARS', scale: 22, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 380, 620) },
     { text: 'LATER...', scale: 18, color: rgb(255, 255, 255) },
-  ], 400, 46);
-  return cv;
+  ], 360, 46);
 }
 
 // ---------------------------------------------------------------------------
@@ -1252,41 +1298,10 @@ function scene2(): Canvas {
 // "WELCOME TO / VICE CITY".
 // ---------------------------------------------------------------------------
 function scene3(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#0b1030')],
-    [0.5, hex('#1a1445')],
-    [1, hex('#3a1a5e')],
-  ]);
-  stars(cv, SEED + 2, 140, 900);
-  // moon + halo
-  cv.glow(1010, 320, 260, rgb(220, 225, 255), 0.5, 2);
-  cv.circle(1010, 320, 92, rgb(240, 242, 255), 1, 2);
-  cv.circle(985, 300, 16, rgb(205, 210, 235), 0.8, 1.5);
-  cv.circle(1035, 345, 11, rgb(205, 210, 235), 0.8, 1.5);
-  // far skyline
-  skyline(cv, SEED + 22, 1380, 240, 480, hex('#0d0a20'));
-  // street: perspective road from the horizon to the bottom edge
-  cv.poly([[560, 1380], [736, 1380], [1296, 2304], [0, 2304]], rgb(14, 11, 24), 1);
-  // wet reflections on the road
-  for (let i = 0; i < 5; i++) {
-    const t = i / 4;
-    const y = 1450 + t * 800;
-    cv.rect(560 - t * 560 + 60, y, 736 + t * 560 - 60, y + 6, rgb(90, 200, 255), 0.16 + t * 0.1, 1.5);
-  }
-  // neon signs on the buildings flanking the street
-  neonSign(cv, 56, 660, 280, 130, 'HOTEL', rgb(255, 70, 180), 7.5);
-  neonSign(cv, 960, 800, 260, 120, 'VICE', rgb(70, 220, 255), 8);
-  neonSign(cv, 66, 1060, 220, 110, 'BAR', rgb(255, 190, 70), 8);
-  neonSign(cv, 1010, 1120, 220, 100, 'CLUB', rgb(180, 90, 255), 7.5);
-  // car, headlights on — bright violet body so it reads on the dark street
-  cv.glow(648, 2010, 400, rgb(180, 90, 255), 0.3, 2);
-  sportsCar(cv, 648, 1980, 1.15, hex('#b45cff'), false);
-  headline(cv, [
+  return stillScene('v6-03-vicecity.png', [
     { text: 'WELCOME TO', scale: 17, color: rgb(255, 255, 255) },
     { text: 'VICE CITY', scale: 20, color: textGradient(rgb(190, 250, 255), rgb(80, 200, 255), 560, 800) },
-  ], 300, 44);
-  return cv;
+  ], 320, 44);
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,52 +1309,10 @@ function scene3(): Canvas {
 // pool far below, city in haze. Tension beat. "NOWHERE TO RUN / WAIT FOR IT..."
 // ---------------------------------------------------------------------------
 function scene5(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#ff9a3c')],
-    [0.38, hex('#ff6b5e')],
-    [0.68, hex('#c23a6e')],
-    [1, hex('#6e2358')],
-  ]);
-  // low sun + haze
-  cv.glow(648, 1120, 620, rgb(255, 190, 90), 0.55, 2);
-  cv.circle(648, 1120, 330, rgb(255, 214, 110), 1, 2);
-  cv.circle(648, 1120, 330, rgb(255, 140, 70), 0.25, 2);
-  skyline(cv, SEED + 23, 1620, 260, 480, hex('#2a0f2e'));
-  haze(cv, 1300, 1620, rgb(255, 140, 90), 0.3);
-  // rooftop slab + parapet edge
-  cv.rectGrad(0, 1620, W, H, [[0, rgb(74, 62, 78)], [1, rgb(40, 34, 46)]]);
-  cv.rect(0, 1620, W, 1660, rgb(96, 84, 100), 1, 0);
-  cv.capsule(0, 1622, W, 1622, 5, rgb(255, 190, 120), 0.5);
-  speckle(cv, SEED + 94, 0, 1660, W, H, 500, [rgb(96, 84, 100), rgb(24, 20, 28)], 0.4, 2);
-  // AC units on the roof
-  cv.rect(120, 1560, 300, 1620, rgb(52, 46, 58), 1, 2);
-  cv.rect(1010, 1570, 1160, 1620, rgb(52, 46, 58), 1, 2);
-  // the glowing pool far below, peeking in at the bottom edge
-  cv.ellipse(900, 2240, 520, 120, rgb(30, 150, 210), 0.9, 3);
-  cv.ellipse(900, 2230, 440, 90, rgb(80, 200, 240), 0.8, 3);
-  star(cv, 820, 2220, 16, rgb(255, 255, 255), 0.8);
-  star(cv, 990, 2240, 13, rgb(255, 255, 255), 0.8);
-  // Jason & Lucia on the roof edge, rim-lit by the sunset
-  person(cv, 520, 1760, 700, 'stand', rgb(16, 8, 20), rgb(255, 150, 90), false, {
-    skin: rgb(198, 148, 108),
-    top: rgb(220, 225, 235),
-    bottom: rgb(40, 42, 52),
-    hair: rgb(40, 26, 16),
-    hairStyle: 'short',
-  });
-  person(cv, 700, 1760, 660, 'stand', rgb(16, 8, 20), rgb(255, 150, 90), true, {
-    skin: rgb(216, 166, 122),
-    top: rgb(180, 40, 70),
-    bottom: rgb(30, 28, 38),
-    hair: rgb(58, 30, 18),
-    hairStyle: 'long',
-  });
-  headline(cv, [
+  return stillScene('v6-05-rooftop.png', [
     { text: 'NOWHERE TO RUN', scale: 15, color: rgb(255, 255, 255) },
     { text: 'WAIT FOR IT...', scale: 10, color: rgb(140, 235, 255) },
-  ], 380, 44);
-  return cv;
+  ], 320, 44);
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,65 +1321,10 @@ function scene5(): Canvas {
 // "THEY JUMPED / OFF A ROOF".
 // ---------------------------------------------------------------------------
 function scene6(): Canvas {
-  const cv = new Canvas(W, H);
-  // bright daylight sky — a hard cut from the dusk scenes (pattern interrupt)
-  cv.vgrad([
-    [0, hex('#2f7fd0')],
-    [0.5, hex('#6db4e8')],
-    [1, hex('#cfeefc')],
-  ]);
-  // sun + clouds
-  cv.glow(240, 300, 320, rgb(255, 250, 220), 0.6, 2);
-  cv.circle(240, 300, 110, rgb(255, 252, 230), 1, 2);
-  const rnd = mulberry32(SEED + 61);
-  for (let i = 0; i < 6; i++) {
-    const cx = 120 + rnd() * 1050;
-    const cy = 180 + rnd() * 620;
-    const r = 90 + rnd() * 130;
-    cv.ellipse(cx, cy, r, r * 0.42, rgb(255, 255, 255), 0.75, 8);
-    cv.ellipse(cx + r * 0.4, cy - r * 0.12, r * 0.55, r * 0.3, rgb(255, 255, 255), 0.7, 8);
-    cv.ellipse(cx, cy + r * 0.22, r * 0.8, r * 0.3, rgb(200, 220, 240), 0.45, 8);
-  }
-  // building side (they jumped from its roof) — windows for scale
-  cv.rectGrad(950, 0, W, 1500, [[0, rgb(96, 88, 110)], [1, rgb(52, 48, 66)]]);
-  for (let row = 0; row < 9; row++) {
-    for (let col = 0; col < 3; col++) {
-      const wx = 990 + col * 100;
-      const wy = 90 + row * 160;
-      const lit = rnd() < 0.5;
-      cv.rect(wx, wy, wx + 62, wy + 96, lit ? rgb(180, 220, 245) : rgb(30, 30, 44), 0.85, 2);
-    }
-  }
-  cv.capsule(950, 0, 950, 1500, 8, rgb(255, 255, 255), 0.35);
-  // pool deck + pool below
-  cv.rect(0, 1880, W, H, rgb(214, 206, 188), 1, 0);
-  speckle(cv, SEED + 95, 0, 1880, W, H, 350, [rgb(180, 172, 154), rgb(240, 234, 220)], 0.4, 2);
-  poolWater(cv, 648, 2120, 640, 250);
-  // motion streaks behind the falling pair
-  const streaks: Array<[number, number, number]> = [[500, 1050, 260], [620, 980, 300], [760, 1010, 280], [880, 1080, 240]];
-  for (const [sx, sy, len] of streaks) {
-    cv.capsule(sx, sy - len / 2, sx, sy + len / 2, 10, rgb(255, 255, 255), 0.4);
-  }
-  // Jason & Lucia mid-air
-  person(cv, 560, 1680, 760, 'jump', rgb(20, 14, 22), rgb(255, 220, 160), false, {
-    skin: rgb(198, 148, 108),
-    top: rgb(220, 225, 235),
-    bottom: rgb(40, 42, 52),
-    hair: rgb(40, 26, 16),
-    hairStyle: 'short',
-  });
-  person(cv, 770, 1560, 720, 'jump', rgb(20, 14, 22), rgb(255, 220, 160), true, {
-    skin: rgb(216, 166, 122),
-    top: rgb(180, 40, 70),
-    bottom: rgb(30, 28, 38),
-    hair: rgb(58, 30, 18),
-    hairStyle: 'long',
-  });
-  headline(cv, [
+  return stillScene('v6-06-jump.png', [
     { text: 'THEY JUMPED', scale: 19, color: rgb(255, 255, 255) },
-    { text: 'OFF A ROOF', scale: 17, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 560, 800) },
-  ], 340, 44);
-  return cv;
+    { text: 'OFF A ROOF', scale: 17, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 380, 620) },
+  ], 300, 44);
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,38 +1332,10 @@ function scene6(): Canvas {
 // a huge white splash crown. The payoff. "INTO THE / POOL!".
 // ---------------------------------------------------------------------------
 function scene7(): Canvas {
-  const cv = new Canvas(W, H);
-  // pool from above: water fills the frame, tile border on top
-  cv.vgrad([
-    [0, hex('#0a5a8c')],
-    [0.5, hex('#0f7fb8')],
-    [1, hex('#1899d4')],
-  ]);
-  // tile border at the top
-  cv.rect(0, 0, W, 130, rgb(226, 220, 204), 1, 0);
-  for (let x = 0; x < W; x += 130) {
-    cv.rect(x, 0, x + 4, 130, rgb(180, 174, 158), 1, 0);
-  }
-  cv.rect(0, 130, W, 138, rgb(160, 154, 138), 1, 0);
-  // caustic streaks + glints across the water
-  const rnd = mulberry32(SEED + 71);
-  for (let i = 0; i < 14; i++) {
-    const x = 80 + rnd() * 1140;
-    const y = 300 + rnd() * 1800;
-    cv.capsule(x - 70, y, x + 70, y + 16, 8, rgb(180, 240, 255), 0.3);
-  }
-  for (let i = 0; i < 8; i++) {
-    const x = 100 + rnd() * 1100;
-    const y = 300 + rnd() * 1800;
-    star(cv, x, y, 10 + rnd() * 14, rgb(255, 255, 255), 0.7);
-  }
-  // the splash
-  splashCrown(cv, 648, 1250, 380, SEED + 72);
-  headline(cv, [
+  return stillScene('v6-07-splash.png', [
     { text: 'INTO THE', scale: 20, color: rgb(255, 255, 255) },
     { text: 'POOL!', scale: 24, color: rgb(255, 255, 255) },
-  ], 330, 44);
-  return cv;
+  ], 340, 46);
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,60 +1344,10 @@ function scene7(): Canvas {
 // "5 STARS / IN 5 MINUTES".
 // ---------------------------------------------------------------------------
 function scene4(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#0a0d24')],
-    [0.5, hex('#171233')],
-    [1, hex('#2a1445')],
-  ]);
-  // police light wash: red left, blue right
-  cv.glow(140, 700, 420, rgb(255, 40, 60), 0.5, 2);
-  cv.glow(1160, 640, 420, rgb(60, 120, 255), 0.5, 2);
-  stars(cv, SEED + 4, 90, 800);
-  skyline(cv, SEED + 24, 1450, 260, 520, hex('#0c0818'));
-  wetRoad(cv, 1450, H, [
-    [220, 24, rgb(255, 60, 80), 0.45],
-    [1050, 24, rgb(80, 140, 255), 0.45],
-    [648, 20, rgb(255, 200, 120), 0.3],
-  ]);
-  // getaway car, facing left — brighter red, bigger, so it reads at night
-  sportsCar(cv, 760, 1830, 1.1, hex('#c22738'), true);
-  // runners with duffel bags — bigger, lifted off the dark street by a warm glow
-  cv.glow(330, 1600, 380, rgb(255, 120, 90), 0.22, 2);
-  person(cv, 400, 1780, 620, 'run', rgb(28, 22, 38), rgb(255, 120, 90), false);
-  person(cv, 250, 1860, 600, 'run', rgb(28, 22, 38), rgb(120, 160, 255), false);
-  // duffel bags (dark rounded shapes near the runners' hands)
-  cv.ellipse(478, 1670, 52, 30, rgb(20, 16, 26), 1, 3);
-  cv.ellipse(330, 1760, 48, 28, rgb(20, 16, 26), 1, 3);
-  // money in the air: small pale-green bills, seeded scatter
-  const rnd = mulberry32(SEED + 44);
-  for (let i = 0; i < 16; i++) {
-    const x = 120 + rnd() * 1050;
-    const y = 900 + rnd() * 620;
-    const a = rnd() * Math.PI;
-    const w = 34 + rnd() * 14;
-    const h = 16 + rnd() * 5;
-    const c = Math.cos(a);
-    const s = Math.sin(a);
-    const pts: Array<[number, number]> = [
-      [x - (w / 2) * c + (h / 2) * s, y - (w / 2) * s - (h / 2) * c],
-      [x + (w / 2) * c + (h / 2) * s, y + (w / 2) * s - (h / 2) * c],
-      [x + (w / 2) * c - (h / 2) * s, y + (w / 2) * s + (h / 2) * c],
-      [x - (w / 2) * c - (h / 2) * s, y - (w / 2) * s + (h / 2) * c],
-    ];
-    cv.poly(pts, rgb(198, 224, 168), 0.95);
-  }
-  // five gold wanted stars, glowing, across the middle of the frame
-  for (let i = 0; i < 5; i++) {
-    const sx = 348 + i * 150;
-    cv.glow(sx, 980, 120, rgb(255, 190, 60), 0.5, 2);
-    star(cv, sx, 980, 54, rgb(255, 196, 66), 1);
-  }
-  headline(cv, [
-    { text: '5 STARS', scale: 22, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 360, 600) },
+  return stillScene('v6-04-wanted.png', [
+    { text: '5 STARS', scale: 22, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 380, 620) },
     { text: 'IN 5 MINUTES', scale: 15, color: rgb(255, 255, 255) },
-  ], 360, 46);
-  return cv;
+  ], 340, 46);
 }
 
 // ---------------------------------------------------------------------------
@@ -1515,27 +1355,11 @@ function scene4(): Canvas {
 // "BUT WAIT — / THIS IS NOT / JUST A GAME".
 // ---------------------------------------------------------------------------
 function scene8(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#120a24')],
-    [0.5, hex('#2a0f3d')],
-    [1, hex('#3d1150')],
-  ]);
-  // concentric magenta aura
-  cv.glow(648, 1000, 760, rgb(255, 60, 170), 0.4, 2);
-  cv.glow(648, 1000, 520, rgb(255, 80, 190), 0.4, 2);
-  cv.glow(648, 1000, 320, rgb(255, 110, 210), 0.35, 2);
-  ghost(cv, 648, 1000, 1.5, rgb(248, 248, 255), rgb(190, 190, 220));
-  starCoin(cv, 320, 700, 72);
-  starCoin(cv, 990, 760, 62);
-  starCoin(cv, 950, 1330, 54);
-  starCoin(cv, 300, 1380, 48);
-  headline(cv, [
-    { text: 'BUT WAIT —', scale: 18, color: rgb(255, 255, 255) },
-    { text: 'THIS IS NOT', scale: 14, color: rgb(255, 255, 255) },
-    { text: 'JUST A GAME', scale: 14, color: rgb(255, 255, 255) },
-  ], 330, 40);
-  return cv;
+  return stillScene('v6-08-twist.png', [
+    { text: 'BUT WAIT —', scale: 14, color: rgb(255, 255, 255) },
+    { text: 'THIS IS NOT', scale: 11, color: rgb(255, 255, 255) },
+    { text: 'JUST A GAME', scale: 11, color: rgb(255, 255, 255) },
+  ], 240, 40);
 }
 
 // ---------------------------------------------------------------------------
@@ -1543,38 +1367,11 @@ function scene8(): Canvas {
 // wording, burned into the frame: "MAKE CLIPS / LIKE THIS / WITH AI".
 // ---------------------------------------------------------------------------
 function scene9(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#050514')],
-    [0.45, hex('#0d0a2a')],
-    [1, hex('#160a3a')],
-  ]);
-  // horizon glow
-  cv.glow(648, 1150, 700, rgb(80, 200, 255), 0.3, 2);
-  cv.glow(648, 1150, 420, rgb(255, 70, 190), 0.25, 2);
-  // neon grid floor: perspective lines from the vanishing point
-  const vx = 648;
-  const vy = 1150;
-  for (let i = -8; i <= 8; i++) {
-    const bx = vx + i * 165;
-    cv.capsule(vx, vy, bx, H, 5, rgb(70, 220, 255), 0.5);
-  }
-  const rows = [1150, 1215, 1300, 1415, 1570, 1780, 2050, 2304];
-  for (let i = 0; i + 1 < rows.length; i++) {
-    const w = 4 + i * 1.6;
-    const a = 0.35 + i * 0.06;
-    cv.capsule(0, rows[i], W, rows[i], w, i % 2 === 0 ? rgb(70, 220, 255) : rgb(255, 70, 190), a);
-  }
-  ghost(cv, 648, 820, 1.1, rgb(248, 248, 255), rgb(190, 190, 220));
-  starCoin(cv, 300, 600, 56);
-  starCoin(cv, 1000, 640, 50);
-  starCoin(cv, 900, 1120, 42);
-  headline(cv, [
+  return stillScene('v6-09-pitch.png', [
     { text: 'MAKE CLIPS', scale: 16, color: rgb(255, 255, 255) },
-    { text: 'LIKE THIS', scale: 17, color: textGradient(rgb(190, 250, 255), rgb(80, 200, 255), 1680, 1880) },
+    { text: 'LIKE THIS', scale: 17, color: textGradient(rgb(190, 250, 255), rgb(80, 200, 255), 560, 800) },
     { text: 'WITH AI', scale: 20, color: rgb(255, 255, 255) },
-  ], 1500, 42);
-  return cv;
+  ], 1450, 44);
 }
 
 // ---------------------------------------------------------------------------
@@ -1582,43 +1379,11 @@ function scene9(): Canvas {
 // "$500 / BOUNTY ON / MAKE.FUN".
 // ---------------------------------------------------------------------------
 function scene10(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#ffe9a8')],
-    [0.45, hex('#f7c948')],
-    [0.8, hex('#e09e00')],
-    [1, hex('#a86e00')],
-  ]);
-  // light rays from the center
-  const cx = 648;
-  const cy = 1000;
-  const rnd = mulberry32(SEED + 7);
-  for (let i = 0; i < 12; i++) {
-    const a0 = (i * 30 + rnd() * 8) * (Math.PI / 180);
-    const a1 = a0 + (7 + rnd() * 6) * (Math.PI / 180);
-    const r = 1500;
-    cv.poly(
-      [
-        [cx, cy],
-        [cx + Math.cos(a0) * r, cy + Math.sin(a0) * r],
-        [cx + Math.cos(a1) * r, cy + Math.sin(a1) * r],
-      ],
-      rgb(255, 255, 255),
-      0.06,
-    );
-  }
-  cv.glow(cx, cy, 560, rgb(255, 240, 180), 0.5, 2);
-  starCoin(cv, 220, 420, 58);
-  starCoin(cv, 1080, 480, 50);
-  starCoin(cv, 180, 1500, 52);
-  starCoin(cv, 1120, 1560, 46);
-  const dark: RGB = rgb(36, 26, 77);
-  headline(cv, [
-    { text: '$500', scale: 32, color: textGradient(rgb(60, 30, 110), rgb(30, 16, 60), 880, 1240) },
-    { text: 'BOUNTY ON', scale: 15, color: dark },
-    { text: 'MAKE.FUN', scale: 21, color: dark },
-  ], 420, 40);
-  return cv;
+  return stillScene('v6-10-bounty.png', [
+    { text: '$500', scale: 32, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 380, 620) },
+    { text: 'BOUNTY ON', scale: 15, color: rgb(255, 255, 255) },
+    { text: 'MAKE.FUN', scale: 21, color: rgb(255, 255, 255) },
+  ], 420, 44);
 }
 
 // ---------------------------------------------------------------------------
@@ -1626,27 +1391,13 @@ function scene10(): Canvas {
 // GTA6-CLIPPER-01 / EARN MONEY MAKING / CLIPS WITH AI".
 // ---------------------------------------------------------------------------
 function scene11(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#100a26')],
-    [0.5, hex('#220f3e')],
-    [1, hex('#3a1150')],
-  ]);
-  cv.glow(648, 900, 780, rgb(255, 60, 170), 0.42, 2);
-  cv.glow(648, 900, 480, rgb(255, 90, 200), 0.4, 2);
-  ghost(cv, 648, 900, 1.6, rgb(248, 248, 255), rgb(190, 190, 220));
-  starCoin(cv, 280, 600, 66);
-  starCoin(cv, 1020, 680, 58);
-  starCoin(cv, 180, 1180, 50);
-  starCoin(cv, 1120, 1220, 46);
-  headline(cv, [
-    { text: 'MAKE.FUN', scale: 21, color: textGradient(rgb(255, 210, 235), rgb(255, 110, 190), 1330, 1560) },
+  return stillScene('v6-11-cta.png', [
+    { text: 'MAKE.FUN', scale: 21, color: textGradient(rgb(255, 210, 235), rgb(255, 110, 190), 1180, 1400) },
     { text: 'MAKE.FUN/BOUNTY/', scale: 9, color: rgb(140, 235, 255) },
     { text: 'GTA6-CLIPPER-01', scale: 9, color: rgb(140, 235, 255) },
     { text: 'EARN MONEY MAKING', scale: 12, color: rgb(255, 255, 255) },
     { text: 'CLIPS WITH AI', scale: 12, color: rgb(255, 255, 255) },
-  ], 1330, 38);
-  return cv;
+  ], 700, 40);
 }
 
 // ---------------------------------------------------------------------------
@@ -1654,26 +1405,14 @@ function scene11(): Canvas {
 // MAKEFUN-HERON- / RECIPE-VERANDA / LINK IN DESCRIPTION / LIKE + SUBSCRIBE".
 // ---------------------------------------------------------------------------
 function scene12(): Canvas {
-  const cv = new Canvas(W, H);
-  cv.vgrad([
-    [0, hex('#0d0a20')],
-    [0.5, hex('#1c0f38')],
-    [1, hex('#2a1150')],
-  ]);
-  cv.glow(648, 780, 640, rgb(255, 60, 170), 0.42, 2);
-  cv.glow(648, 780, 380, rgb(255, 90, 200), 0.38, 2);
-  ghost(cv, 648, 780, 1.3, rgb(248, 248, 255), rgb(190, 190, 220));
-  starCoin(cv, 960, 540, 72);
-  starCoin(cv, 300, 620, 54);
-  headline(cv, [
+  return stillScene('v6-12-endcard.png', [
     { text: 'MAKE.FUN', scale: 20, color: textGradient(rgb(255, 210, 235), rgb(255, 110, 190), 1180, 1400) },
     { text: 'PLAY CODE:', scale: 13, color: rgb(255, 255, 255) },
     { text: 'MAKEFUN-HERON-', scale: 11, color: rgb(140, 235, 255) },
     { text: 'RECIPE-VERANDA', scale: 11, color: rgb(140, 235, 255) },
-    { text: 'LINK IN DESCRIPTION', scale: 9, color: textGradient(rgb(255, 224, 130), rgb(255, 170, 60), 1900, 2000) },
+    { text: 'LINK IN DESCRIPTION', scale: 9, color: textGradient(rgb(255, 224, 130), rgb(255, 150, 40), 380, 620) },
     { text: 'LIKE + SUBSCRIBE', scale: 10, color: rgb(255, 255, 255) },
-  ], 1180, 38);
-  return cv;
+  ], 1150, 38);
 }
 
 // ---------------------------------------------------------------------------
